@@ -1,4 +1,4 @@
-# BreachPress - BreachPress
+# BreachPress
 
 A comprehensive penetration testing tool for WordPress that intelligently enumerates attack surfaces, discovers users, and performs efficient password spraying across multiple authentication mechanisms.
 
