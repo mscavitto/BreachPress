@@ -387,19 +387,20 @@ By: Michael @ Breach Craft
             for idx, response_elem in enumerate(responses):
                 if idx >= len(attempts):
                     break
-                
-                # Check if this is a successful response (not a fault)
-                fault = response_elem.find('.//fault')
-                if fault is None:
-                    # No fault means successful authentication
+
+                # Check if this is a fault response
+                # In multicall, faults are structs with faultCode/faultString members
+                fault_code = response_elem.find('.//member[name="faultCode"]')
+                fault_string_elem = response_elem.find('.//member[name="faultString"]/value/string')
+
+                if fault_code is None:
+                    # No faultCode means successful authentication
                     username, password = attempts[idx]
                     successful.append((username, password))
-                elif self.verbose:
+                elif self.verbose and fault_string_elem is not None:
                     # Log fault details if verbose
-                    fault_string = response_elem.find('.//member[name="faultString"]/value/string')
-                    if fault_string is not None:
-                        username, password = attempts[idx]
-                        self.logger.debug(f"{username}:{password} - {fault_string.text}")
+                    username, password = attempts[idx]
+                    self.logger.debug(f"{username}:{password} - {fault_string_elem.text}")
         
         except ET.ParseError as e:
             self.logger.error(f"Failed to parse XML response: {e}")
