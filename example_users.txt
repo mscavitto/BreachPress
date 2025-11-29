@@ -1,0 +1,9 @@
+admin
+administrator
+wordpress
+webmaster
+root
+test
+demo
+user
+guest
