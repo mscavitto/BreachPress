@@ -103,6 +103,8 @@ Attack Options:
   --batch-size N             Multicall batch size (default: 100)
   --delay SECONDS            Delay between requests (default: 1.0)
   --timeout SECONDS          Request timeout (default: 10)
+  --user-agent USER_AGENT    Custom User-Agent string (default: random from agents.txt)
+  --agents-file AGENTS_FILE  Path to file containing User-Agent strings (default: agents.txt)
 
 Output Options:
   -o, --output FILE          Save successful credentials to file
